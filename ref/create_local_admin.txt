@@ -1,0 +1,139 @@
+---
+# File: /etc/ansible/books/create_local_admin.yml
+# Author: bgstack15
+# Startdate: 2017-09-12
+# Title: Playbook that creates a local user that is an admin
+# Purpose: Makes it easier to deploy local admins with special account restrictions.
+# History:
+#    2017-11-28 commented out /home/ansible/mypassword. Added vars_prompt and Install libselinux-python
+# Usage:
+#    time ansible-playbook /etc/ansible/books/create_local_admin.yml -i /etc/ansible/inv/inv.yml --become -u ansible_preprod -e 'host=test1,test2,test3' -e 'item=bgstack15' -e 'uid=9985' -e 'ssh_key=true' -v | ctee /etc/ansible/log/bgstack15.log
+#    Must run as root, so use the --become flag!
+#    Required vars: item,uid
+#    Optional vars: ssh_key=true. If ssh_key is true, will copy in authorized key from ansible server /home/{{ item }}/.ssh/id_rsa.pub
+#    Make file /root/mypassword with the contents:
+#    ---
+#    password:D31ic10u$fu77yc@T
+#    ...
+# Reference:
+# Version: 2017-11-28a
+# Notes:
+#    The specific choice to use lots of command modules instead of built in user and group modules is because we have sssd users in some cases, which are being resolved, but this script exists because we definitely want to create local users. The convention is to use the exact same name for local users, even though they have the same home directory as the sssd users. The uid collisions will only affect those with local users, which will really only be us admins.
+
+- hosts: "{{ host }}"
+#  vars_files:
+#    - /home/ansible/mypassword
+  vars_prompt:
+    - name: "password"
+      prompt: "Enter Password"
+      private: yes
+      encrypt: "sha512_crypt"
+      confirm: yes
+      salt_size: 7
+  tasks:
+    - name: Install libselinux-python
+      yum: name=libselinux-python
+    - name: determine if local user exists
+      command: grep -o -e "^{{ item }}:" /etc/passwd
+      register: user_stat
+      ignore_errors: true
+      changed_when: false
+
+    #- debug:
+    #    var: user_stat.stdout
+
+    - name: create local user when local user is absent
+      block:
+
+      - name: create local group
+        command: groupadd -g {{ uid }} "{{ item }}"
+
+      - name: create local user
+        command: luseradd -g {{ uid }} -u {{ uid }} "{{ item }}"
+
+      when: user_stat.stdout == ""
+
+    - name: ensure admin user is in wheel
+      user:
+        name: "{{ item }}"
+        append: yes
+        groups: wheel
+
+    - name: Move pexpect-3.3 to server and untar
+      unarchive:
+        src: /etc/ansible/templates/pexpect-3.3.tar.gz
+        dest: /usr/
+        owner: root
+        group: root
+        mode: 0770
+      register: pexpect_installed
+
+    - name: Install pexpect
+      command: /usr/bin/python setup.py install
+      args:
+        chdir: /usr/pexpect-3.3/
+
+    - name: Set password to permanent password
+      expect:
+        command: passwd "{{ item }}"
+        responses:
+           (?i)password: "{{ password }}"
+
+    - name: Password last set on today, with minimum password life of 0 days
+      command: chage -d "{{ ansible_date_time.date }}" -m 0 -E 99999 -M -1 "{{ item }}"
+
+    #- name: Set expiration date of effectively never 
+    #  command: usermod -e 99999 "{{ item }}"
+
+    - name: get contents of public key
+      command: printf "{{ lookup('file','/home/{{ item }}/.ssh/id_rsa.pub') }}\n"
+      register: contents
+      changed_when: false
+      when: ssh_key is defined
+
+    - name: add ssh key for user, from controlling server
+      block:
+        #- debug:
+        #    var: contents.stdout
+
+        - name: check if authorized_keys file exists already
+          stat:
+            path: /home/{{ item }}/.ssh/authorized_keys
+          register: authorized_keys
+          changed_when: False
+
+        - debug: var=authorized_keys
+
+        - name: check authorized_keys for key already
+          command: grep "{{ contents.stdout }}" /home/{{ item }}/.ssh/authorized_keys
+          register: check_authorized_keys
+          changed_when: False
+          ignore_errors: true
+          when: authorized_keys.stat.exists|bool == true
+
+        - debug: var=check_authorized_keys
+
+        - name: prepare user .ssh directory
+          file:
+            path: /home/{{ item }}/.ssh
+            recurse: yes
+            state: directory
+            owner: "{{ item }}"
+            group: "{{ item }}"
+            mode: 0700
+          when: (check_authorized_keys.stdout is defined and check_authorized_keys.stdout == "") or (authorized_keys.stat.exists|bool == false)
+
+        - name: place ssh key for user
+          lineinfile:
+            path: /home/{{ item }}/.ssh/authorized_keys
+            state: present
+            line: "{{ contents.stdout }}"
+            create: yes
+            owner: "{{ item }}"
+            group: "{{ item }}"
+            mode: 0600
+          when: (check_authorized_keys.stdout is defined and check_authorized_keys.stdout == "") or (authorized_keys.stat.exists|bool == false)
+
+      when: ssh_key is defined and ssh_key|bool == true and contents.stdout != "" and contents.stdout != "\n"
+
+...

@@ -1,0 +1,71 @@
+---
+# File: changepw.yml
+# Location: /etc/ansible/shell/changepw/
+# Author: bgstack15@gmail.com
+# Startdate: 2018-01-04
+# Title: Ansible Playbook that Changes My Password
+# Purpose: Make changing my password easy in an environment where hosts have expirable passwords
+# History:
+# Usage:
+#    Use changepw.sh, which calls this playbook.
+# Reference:
+#    ref/create_local_admin.yml
+# Improve:
+# Document:
+
+- name: Playbook that changes my password
+  vars_files:
+  - "{{ vaultfile }}"
+  hosts: "{{ sitelimit }}"
+  tasks:
+  - ping:
+
+  - name: Install dependencies on OL7
+    yum:
+      name: "{{ item }}"
+      enablerepo: ol7_latest
+    with_items:
+    - pexpect
+    when:
+    - ansible_distribution_major_version == "7"
+    - ansible_os_family == "RedHat"
+    tags:
+    - expect
+
+  - name: Learn if local user exists
+    shell: grep -o -e "^{{ thisuser }}:" /etc/passwd | cat -
+    register: user_stat
+    changed_when: false
+
+  - name: Set password only when local user exists
+    block:
+
+    - name: Set permanent password
+      expect:
+        command: passwd "{{ thisuser }}"
+        responses:
+           (?i)password: "{{ thispassword }}"
+      tags:
+      - expect
+
+    - name: Set password, hardcore mode
+      lineinfile:
+        path: /etc/shadow
+        regexp: '^({{ thisuser }}:)\$.{80,120}((:.+){6})'
+        backrefs: yes
+        line: '\1{{ thispasswordhash }}\2'
+        backup: yes
+      register: shadow
+      tags:
+      - hardcore
+
+    - name: Set password last date set to today
+      shell: chage -d "{{ ansible_date_time.date }}" "{{ thisuser }}"
+      changed_when: false
+      tags:
+      - hardcore
+
+    when:
+    - user_stat.stdout != ""
+    tags:
+    - changepw
